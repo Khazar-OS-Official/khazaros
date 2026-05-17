@@ -82,6 +82,14 @@ typedef struct __attribute__((packed)) {
 // Driver state
 static ethernet_device_t eth_dev;
 static volatile uint32_t *e1000_mmio = NULL;
+static int net_driver_type = 0; // 0 = none, 1 = E1000, 2 = RTL8169
+
+// --- Realtek RTL8169 Driver Externs ---
+extern bool rtl8169_init(const pci_device_t *dev);
+extern bool rtl8169_send(const uint8_t *dst_mac, uint16_t ethertype, const void *payload, uint16_t len);
+extern int rtl8169_receive(uint8_t *buf, uint16_t maxlen);
+extern bool rtl8169_is_ready(void);
+extern void rtl8169_get_mac(uint8_t *mac);
 
 static e1000_rx_desc_t rx_descs[NUM_RX_DESC] __attribute__((aligned(16)));
 static e1000_tx_desc_t tx_descs[NUM_TX_DESC] __attribute__((aligned(16)));
@@ -162,92 +170,113 @@ static uint32_t pci_read_bar0(const pci_device_t *dev) {
 
 // --- Public API ---
 bool ethernet_init(void) {
-  const pci_device_t *found = NULL;
+  // First, search for Intel E1000
+  const pci_device_t *found_e1000 = NULL;
   for (uint32_t i = 0; i < pci_get_device_count(); i++) {
     const pci_device_t *d = pci_get_device(i);
     if (d->vendor_id == 0x8086 &&
         (d->device_id == 0x100E || d->device_id == 0x100F ||
          d->device_id == 0x1010 || d->device_id == 0x1016)) {
-      found = d;
+      found_e1000 = d;
       break;
     }
   }
-  if (!found) {
-    kprintf("NET: Intel E1000 not found on PCI bus\n");
-    return false;
+
+  if (found_e1000) {
+    kprintf("NET: Intel E1000 found, initializing...\n");
+    uint32_t bar0 = pci_read_bar0(found_e1000);
+    if (bar0 & 1) {
+      kprintf("NET: E1000 BAR0 is I/O space, need MMIO\n");
+      return false;
+    }
+
+    eth_dev.mmio_base = bar0 & 0xFFFFFFF0;
+    eth_dev.pci_dev = found_e1000;
+
+    // --- Map E1000 MMIO into kernel virtual address space ---
+    uint32_t mmio_phys = eth_dev.mmio_base;
+    for (int pg = 0; pg < 32; pg++) {
+      uint32_t phys_page = mmio_phys + pg * 4096;
+      vmm_map_page((void *)phys_page, (void *)phys_page,
+                   VMM_PRESENT | VMM_WRITABLE);
+    }
+
+    e1000_mmio = (volatile uint32_t *)mmio_phys;
+    kprintf("NET: E1000 MMIO=0x%x (mapped)\n", eth_dev.mmio_base);
+
+    // Enable PCI Bus Mastering
+    uint32_t cmd_addr = (1u << 31) | ((uint32_t)found_e1000->bus << 16) |
+                        ((uint32_t)found_e1000->dev << 11) |
+                        ((uint32_t)found_e1000->func << 8) | 0x04;
+    outl(0xCF8, cmd_addr);
+    uint32_t cmd = inl(0xCFC);
+    outl(0xCF8, cmd_addr);
+    outl(0xCFC, cmd | 0x04); // Bus Master Enable
+
+    // Reset NIC
+    e1000_w(REG_CTRL, e1000_r(REG_CTRL) | CTRL_RST);
+    volatile uint32_t spin = 1000000;
+    while ((e1000_r(REG_CTRL) & CTRL_RST) && spin--)
+      ;
+
+    // Enable link
+    e1000_w(REG_CTRL, e1000_r(REG_CTRL) | CTRL_SLU);
+
+    // Clear multicast table
+    for (int i = 0; i < 128; i++)
+      e1000_w(REG_MTA + i * 4, 0);
+
+    // Disable all interrupts
+    e1000_w(REG_IMC, 0xFFFFFFFF);
+    e1000_r(REG_ICR);
+
+    // Read MAC from EEPROM
+    e1000_read_mac(eth_dev.mac);
+    kprintf("NET: MAC=%02x:%02x:%02x:%02x:%02x:%02x\n", eth_dev.mac[0],
+            eth_dev.mac[1], eth_dev.mac[2], eth_dev.mac[3], eth_dev.mac[4],
+            eth_dev.mac[5]);
+
+    // Write MAC to Receive Address registers
+    uint32_t ral = eth_dev.mac[0] | (eth_dev.mac[1] << 8) |
+                   (eth_dev.mac[2] << 16) | (eth_dev.mac[3] << 24);
+    uint32_t rah = eth_dev.mac[4] | (eth_dev.mac[5] << 8) | (1u << 31);
+    e1000_w(REG_RAL, ral);
+    e1000_w(REG_RAH, rah);
+
+    e1000_init_rx();
+    e1000_init_tx();
+
+    net_driver_type = 1;
+    eth_dev.initialized = true;
+    kprintf("NET: E1000 ready\n");
+    return true;
   }
 
-  uint32_t bar0 = pci_read_bar0(found);
-  if (bar0 & 1) {
-    kprintf("NET: E1000 BAR0 is I/O space, need MMIO\n");
-    return false;
+  // Second, search for Realtek RTL8169/8136/8168
+  const pci_device_t *found_rtl = NULL;
+  for (uint32_t i = 0; i < pci_get_device_count(); i++) {
+    const pci_device_t *d = pci_get_device(i);
+    if (d->vendor_id == 0x10EC &&
+        (d->device_id == 0x8136 || d->device_id == 0x8168 || d->device_id == 0x8169)) {
+      found_rtl = d;
+      break;
+    }
   }
 
-  eth_dev.mmio_base = bar0 & 0xFFFFFFF0;
-  eth_dev.pci_dev = found;
-
-  // --- Map E1000 MMIO into kernel virtual address space ---
-  // The NIC registers live at a physical address that is NOT in our page
-  // tables. We use identity-mapping (the E1000 MMIO region is typically above
-  // 0xF0000000 which is already above KERNEL_VIRT_BASE, so we map phys == virt
-  // for it). We need 128KB (32 pages) to cover all E1000 registers.
-  uint32_t mmio_phys = eth_dev.mmio_base;
-  for (int pg = 0; pg < 32; pg++) {
-    uint32_t phys_page = mmio_phys + pg * 4096;
-    // Map phys -> same virtual address (identity mapping for MMIO)
-    // Use Write-Through + Cache-Disable (bits 3 and 4 in the PTE)
-    vmm_map_page((void *)phys_page, (void *)phys_page,
-                 VMM_PRESENT | VMM_WRITABLE);
+  if (found_rtl) {
+    kprintf("NET: Found Realtek RTL8169/8136/8168, initializing...\n");
+    if (rtl8169_init(found_rtl)) {
+      net_driver_type = 2;
+      eth_dev.pci_dev = found_rtl;
+      rtl8169_get_mac(eth_dev.mac);
+      eth_dev.initialized = true;
+      kprintf("NET: Realtek NIC Ready\n");
+      return true;
+    }
   }
 
-  e1000_mmio = (volatile uint32_t *)mmio_phys;
-  kprintf("NET: E1000 MMIO=0x%x (mapped)\n", eth_dev.mmio_base);
-
-  // Enable PCI Bus Mastering
-  uint32_t cmd_addr = (1u << 31) | ((uint32_t)found->bus << 16) |
-                      ((uint32_t)found->dev << 11) |
-                      ((uint32_t)found->func << 8) | 0x04;
-  outl(0xCF8, cmd_addr);
-  uint32_t cmd = inl(0xCFC);
-  outl(0xCF8, cmd_addr);
-  outl(0xCFC, cmd | 0x04); // Bus Master Enable
-
-  // Reset NIC
-  e1000_w(REG_CTRL, e1000_r(REG_CTRL) | CTRL_RST);
-  volatile uint32_t spin = 1000000;
-  while ((e1000_r(REG_CTRL) & CTRL_RST) && spin--)
-    ;
-
-  // Enable link
-  e1000_w(REG_CTRL, e1000_r(REG_CTRL) | CTRL_SLU);
-
-  // Clear multicast table
-  for (int i = 0; i < 128; i++)
-    e1000_w(REG_MTA + i * 4, 0);
-
-  // Disable all interrupts
-  e1000_w(REG_IMC, 0xFFFFFFFF);
-  e1000_r(REG_ICR);
-
-  // Read MAC from EEPROM
-  e1000_read_mac(eth_dev.mac);
-  kprintf("NET: MAC=%02x:%02x:%02x:%02x:%02x:%02x\n", eth_dev.mac[0],
-          eth_dev.mac[1], eth_dev.mac[2], eth_dev.mac[3], eth_dev.mac[4],
-          eth_dev.mac[5]);
-
-  // Write MAC to Receive Address registers
-  uint32_t ral = eth_dev.mac[0] | (eth_dev.mac[1] << 8) |
-                 (eth_dev.mac[2] << 16) | (eth_dev.mac[3] << 24);
-  uint32_t rah = eth_dev.mac[4] | (eth_dev.mac[5] << 8) | (1u << 31);
-  e1000_w(REG_RAL, ral);
-  e1000_w(REG_RAH, rah);
-
-  e1000_init_rx();
-  e1000_init_tx();
-
-  eth_dev.initialized = true;
-  kprintf("NET: E1000 ready\n");
-  return true;
+  kprintf("NET: No compatible network card (Intel E1000 or Realtek RTL8169/8136) found!\n");
+  return false;
 }
 
 bool ethernet_send(const uint8_t *dst_mac, uint16_t ethertype,
@@ -255,57 +284,75 @@ bool ethernet_send(const uint8_t *dst_mac, uint16_t ethertype,
   if (!eth_dev.initialized)
     return false;
 
-  // Build Ethernet frame in TX buffer
-  uint8_t *frame = tx_buf[tx_cur];
-  // Destination MAC
-  for (int i = 0; i < 6; i++)
-    frame[i] = dst_mac[i];
-  // Source MAC
-  for (int i = 0; i < 6; i++)
-    frame[6 + i] = eth_dev.mac[i];
-  // EtherType (big-endian)
-  frame[12] = (ethertype >> 8) & 0xFF;
-  frame[13] = ethertype & 0xFF;
-  // Payload
-  uint16_t total = 14 + len;
-  if (total > PACKET_SIZE)
-    total = PACKET_SIZE;
-  memcpy(frame + 14, payload, total - 14);
+  if (net_driver_type == 1) {
+    // Build Ethernet frame in TX buffer
+    uint8_t *frame = tx_buf[tx_cur];
+    // Destination MAC
+    for (int i = 0; i < 6; i++)
+      frame[i] = dst_mac[i];
+    // Source MAC
+    for (int i = 0; i < 6; i++)
+      frame[6 + i] = eth_dev.mac[i];
+    // EtherType (big-endian)
+    frame[12] = (ethertype >> 8) & 0xFF;
+    frame[13] = ethertype & 0xFF;
+    // Payload
+    uint16_t total = 14 + len;
+    if (total > PACKET_SIZE)
+      total = PACKET_SIZE;
+    memcpy(frame + 14, payload, total - 14);
 
-  // Set descriptor
-  tx_descs[tx_cur].length = total;
-  tx_descs[tx_cur].cmd = TX_CMD_EOP | TX_CMD_IFCS | TX_CMD_RS;
-  tx_descs[tx_cur].status = 0;
+    // Set descriptor
+    tx_descs[tx_cur].length = total;
+    tx_descs[tx_cur].cmd = TX_CMD_EOP | TX_CMD_IFCS | TX_CMD_RS;
+    tx_descs[tx_cur].status = 0;
 
-  tx_cur = (tx_cur + 1) % NUM_TX_DESC;
-  e1000_w(REG_TDT, tx_cur);
+    tx_cur = (tx_cur + 1) % NUM_TX_DESC;
+    e1000_w(REG_TDT, tx_cur);
 
-  // Wait for completion
-  volatile uint32_t timeout = 1000000;
-  uint32_t prev = (tx_cur == 0) ? NUM_TX_DESC - 1 : tx_cur - 1;
-  while (!(tx_descs[prev].status & TX_STA_DD) && timeout--)
-    ;
+    // Wait for completion
+    volatile uint32_t timeout = 1000000;
+    uint32_t prev = (tx_cur == 0) ? NUM_TX_DESC - 1 : tx_cur - 1;
+    while (!(tx_descs[prev].status & TX_STA_DD) && timeout--)
+      ;
 
-  return true;
+    return true;
+  } else if (net_driver_type == 2) {
+    return rtl8169_send(dst_mac, ethertype, payload, len);
+  }
+  return false;
 }
 
 int ethernet_receive(uint8_t *buf, uint16_t maxlen) {
   if (!eth_dev.initialized)
     return -1;
-  if (!(rx_descs[rx_cur].status & 0x01))
-    return 0; // No packet yet
 
-  uint16_t len = rx_descs[rx_cur].length;
-  if (len > maxlen)
-    len = maxlen;
-  memcpy(buf, rx_buf[rx_cur], len);
-  rx_descs[rx_cur].status = 0;
-  e1000_w(REG_RDT, rx_cur);
-  rx_cur = (rx_cur + 1) % NUM_RX_DESC;
-  return len;
+  if (net_driver_type == 1) {
+    if (!(rx_descs[rx_cur].status & 0x01))
+      return 0; // No packet yet
+
+    uint16_t len = rx_descs[rx_cur].length;
+    if (len > maxlen)
+      len = maxlen;
+    memcpy(buf, rx_buf[rx_cur], len);
+    rx_descs[rx_cur].status = 0;
+    e1000_w(REG_RDT, rx_cur);
+    rx_cur = (rx_cur + 1) % NUM_RX_DESC;
+    return len;
+  } else if (net_driver_type == 2) {
+    return rtl8169_receive(buf, maxlen);
+  }
+  return -1;
 }
 
-bool ethernet_is_ready(void) { return eth_dev.initialized; }
+bool ethernet_is_ready(void) { 
+  if (net_driver_type == 1) {
+    return eth_dev.initialized; 
+  } else if (net_driver_type == 2) {
+    return rtl8169_is_ready();
+  }
+  return false;
+}
 const ethernet_device_t *ethernet_get_device(void) {
   return eth_dev.initialized ? &eth_dev : (ethernet_device_t *)0;
 }

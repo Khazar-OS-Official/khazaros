@@ -357,12 +357,33 @@ static void wm_draw_window_content(window_t *win) {
     // CPU Info
     gfx_puts(win->x + 20, cy + 60, "CPU: x86 Generic (32-bit)", 0x00333333);
 
-    // PCI Devices
-    gfx_puts(win->x + 20, cy + 90, "Hardware:", 0x00333333);
-    for (uint32_t i = 0; i < pci_get_device_count() && i < 10; i++) {
+    // PCI Network Devices specifically
+    gfx_puts(win->x + 20, cy + 90, "Network Hardware:", 0x00333333);
+    int shown = 0;
+    for (uint32_t i = 0; i < pci_get_device_count(); i++) {
         const pci_device_t *d = pci_get_device(i);
-        ksprintf(buf, "- Bus %d, Dev %d (Ven: %x, Dev: %x, Cls: %x)", d->bus, d->dev, d->vendor_id, d->device_id, d->class_code);
-        gfx_puts(win->x + 30, cy + 110 + i * 15, buf, 0x00666666);
+        if (d->class_code == 0x02) { // Class 2 = Network Controller
+            ksprintf(buf, "- Bus %d, Dev %d (Ven: %x, Dev: %x, SubCls: %x)", d->bus, d->dev, d->vendor_id, d->device_id, d->subclass);
+            gfx_puts(win->x + 30, cy + 110 + shown * 15, buf, 0x003A78C8); // Blue for net
+            shown++;
+        }
+    }
+    if (shown == 0) {
+        gfx_puts(win->x + 30, cy + 110, "No PCI Network cards found!", 0x00CC2222);
+        shown = 1;
+    }
+
+    // Other PCI Devices
+    gfx_puts(win->x + 20, cy + 110 + shown * 15 + 10, "Other Hardware:", 0x00333333);
+    int other_y = cy + 110 + shown * 15 + 25;
+    int other_shown = 0;
+    for (uint32_t i = 0; i < pci_get_device_count() && other_shown < 6; i++) {
+        const pci_device_t *d = pci_get_device(i);
+        if (d->class_code != 0x02) {
+            ksprintf(buf, "- Bus %d, Dev %d (Ven: %x, Dev: %x, Cls: %x)", d->bus, d->dev, d->vendor_id, d->device_id, d->class_code);
+            gfx_puts(win->x + 30, other_y + other_shown * 15, buf, 0x00666666);
+            other_shown++;
+        }
     }
   } else if (win->type == WINDOW_TYPE_FILES) {
     gfx_draw_rect(win->x + 2, cy, win->w - 4, ch - 2, 0x00F8F8F8);
