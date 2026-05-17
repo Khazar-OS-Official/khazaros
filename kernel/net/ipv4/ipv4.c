@@ -60,6 +60,37 @@ void ipv4_init(void) { ip_id = 0; }
 
 bool ipv4_send(uint32_t dst_ip, uint8_t protocol, const void *payload,
                uint16_t plen) {
+  // Loopback (127.0.0.1 -> 0x0100007F) or sending to our own IP
+  if (dst_ip == 0x0100007F || dst_ip == net_our_ip) {
+    uint8_t loop_buf[1518];
+    uint16_t total = sizeof(ipv4_header_t) + plen;
+    if (total + 14 > sizeof(loop_buf)) return false;
+
+    // Mock Ethernet header (14 bytes)
+    memset(loop_buf, 0, 14);
+    loop_buf[12] = 0x08; // IPv4 (0x0800 big-endian)
+    loop_buf[13] = 0x00;
+
+    ipv4_header_t *hdr = (ipv4_header_t *)(loop_buf + 14);
+    hdr->ver_ihl = 0x45;
+    hdr->tos = 0;
+    hdr->total_len = bswap16(total);
+    hdr->id = bswap16(ip_id++);
+    hdr->frag_off = 0;
+    hdr->ttl = 64;
+    hdr->protocol = protocol;
+    hdr->checksum = 0;
+    hdr->src_ip = net_our_ip;
+    hdr->dst_ip = dst_ip;
+    hdr->checksum = ip_checksum(hdr, sizeof(ipv4_header_t));
+
+    memcpy(loop_buf + 14 + sizeof(ipv4_header_t), payload, plen);
+
+    // Bypasses the network card, loopback processed immediately in receiving path
+    ipv4_handle(loop_buf, total + 14);
+    return true;
+  }
+
   // For VirtualBox NAT, always ARP for dst_ip directly.
   // (The gateway 10.0.2.2 is reachable by direct ARP on the virtual LAN.)
   uint8_t dst_mac[6];

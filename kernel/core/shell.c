@@ -314,12 +314,16 @@ static void shell_process_command(char *command) {
     uint32_t dst_ip = a | (b << 8) | (c << 16) | (d << 24);
     kprintf("ping: ARP həll edilir %d.%d.%d.%d...\n", a, b, c, d);
 
-    arp_request(dst_ip);
-    uint8_t mac_out[6];
     int got_arp = 0;
-    for (uint32_t i = 0; i < 500000; i++) {
-      if (arp_lookup(dst_ip, mac_out)) { got_arp = 1; break; }
-      __asm__ volatile("int $0x20");
+    if (dst_ip == 0x0100007F || dst_ip == net_our_ip) {
+      got_arp = 1;
+    } else {
+      arp_request(dst_ip);
+      uint8_t mac_out[6];
+      for (uint32_t i = 0; i < 500000; i++) {
+        if (arp_lookup(dst_ip, mac_out)) { got_arp = 1; break; }
+        __asm__ volatile("int $0x20");
+      }
     }
 
     if (got_arp) {
