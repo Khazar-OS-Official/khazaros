@@ -1,0 +1,22 @@
+# Build directories
+build/
+
+# Binary assets and disk images
+*.bin
+*.iso
+*.img
+*.vdi
+khazar_kernel.bin
+khazar_os.iso
+khazar_hd.img
+khazar_hd.vdi
+
+# Editor config
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS specific files
+.DS_Store
+Thumbs.db
