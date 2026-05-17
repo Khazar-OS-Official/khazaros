@@ -1,12 +1,39 @@
 #include <fs/devfs.h>
 #include <mm/kheap.h>
 #include <libk/string.h>
+#include <net/ethernet.h>
 
 #define MAX_DEVICES 32
 
 static vfs_node_t *devfs_root = NULL;
 static vfs_node_t *devices[MAX_DEVICES];
 static int num_devices = 0;
+
+static uint32_t netinfo_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer) {
+    (void)node;
+    if (offset > 0) return 0;
+    
+    char tmp[128] = "None";
+    if (ethernet_is_ready()) {
+        const ethernet_device_t *eth = ethernet_get_device();
+        if (eth && eth->pci_dev) {
+            char dname[32] = "Unknown";
+            if (eth->pci_dev->vendor_id == 0x10EC) {
+                strcpy(dname, "Realtek RTL8136");
+            } else if (eth->pci_dev->vendor_id == 0x8086) {
+                strcpy(dname, "Intel E1000");
+            }
+            extern void ksnprintf(char *str, size_t n, const char *format, ...);
+            ksnprintf(tmp, sizeof(tmp), "%s (%02X:%02X:%02X:%02X:%02X:%02X)",
+                      dname, eth->mac[0], eth->mac[1], eth->mac[2], eth->mac[3], eth->mac[4], eth->mac[5]);
+        }
+    }
+    
+    uint32_t len = strlen(tmp);
+    if (size < len) len = size;
+    memcpy(buffer, tmp, len);
+    return len;
+}
 
 static vfs_node_t *devfs_readdir(vfs_node_t *node, uint32_t index) {
     (void)node;
@@ -37,6 +64,16 @@ void devfs_init(void) {
     
     if (dev_dir) {
         vfs_mount("/dev", devfs_root);
+    }
+
+    // Register /dev/netinfo Char Device
+    vfs_node_t *netinfo_node = (vfs_node_t*)kmalloc(sizeof(vfs_node_t));
+    if (netinfo_node) {
+        memset(netinfo_node, 0, sizeof(vfs_node_t));
+        kstrncpy(netinfo_node->name, "netinfo", 127);
+        netinfo_node->flags = VFS_CHAR_DEVICE;
+        netinfo_node->read = netinfo_read;
+        devfs_register_device("netinfo", netinfo_node);
     }
 }
 
