@@ -200,7 +200,23 @@ static void shell_process_command(char *command) {
     kprintf("  Kernel:    Monolithic, Custom\n");
     kprintf("  FS:        FAT32 over ATA/LBA28 PIO\n");
     kprintf("  GUI:       VBE VESA Framebuffer @ 1024x768x32\n");
-    kprintf("  Network:   Intel E1000 (ARP/IPv4/UDP)\n");
+    if (ethernet_is_ready()) {
+      const ethernet_device_t *eth = ethernet_get_device();
+      if (eth && eth->pci_dev) {
+        char dname[32] = "Unknown";
+        if (eth->pci_dev->vendor_id == 0x10EC) {
+          strcpy(dname, "Realtek RTL8136");
+        } else if (eth->pci_dev->vendor_id == 0x8086) {
+          strcpy(dname, "Intel E1000");
+        }
+        kprintf("  Network:   %s (%02X:%02X:%02X:%02X:%02X:%02X)\n",
+                dname, eth->mac[0], eth->mac[1], eth->mac[2], eth->mac[3], eth->mac[4], eth->mac[5]);
+      } else {
+        kprintf("  Network:   None (Not bound)\n");
+      }
+    } else {
+      kprintf("  Network:   None (Not active)\n");
+    }
     kprintf("  Shell:     Built-in with history & tab-complete\n\n");
 
   } else if (strcmp(command, "about") == 0) {
