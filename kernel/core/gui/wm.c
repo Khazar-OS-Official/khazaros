@@ -363,7 +363,7 @@ static void wm_draw_window_content(window_t *win) {
     for (uint32_t i = 0; i < pci_get_device_count(); i++) {
         const pci_device_t *d = pci_get_device(i);
         if (d->class_code == 0x02) { // Class 2 = Network Controller
-            ksprintf(buf, "- Bus %d, Dev %d (Ven: %x, Dev: %x, SubCls: %x)", d->bus, d->dev, d->vendor_id, d->device_id, d->subclass);
+            ksprintf(buf, "- Bus %d, Dev %d (Ven: %x, Dev: %x)", d->bus, d->dev, d->vendor_id, d->device_id);
             gfx_puts(win->x + 30, cy + 110 + shown * 15, buf, 0x003A78C8); // Blue for net
             shown++;
         }
@@ -372,6 +372,32 @@ static void wm_draw_window_content(window_t *win) {
         gfx_puts(win->x + 30, cy + 110, "No PCI Network cards found!", 0x00CC2222);
         shown = 1;
     }
+
+    // Active Driver Status
+    int net_status_y = cy + 110 + shown * 15 + 5;
+    gfx_puts(win->x + 20, net_status_y, "Driver Status:", 0x00333333);
+    if (ethernet_is_ready()) {
+        const ethernet_device_t *eth = ethernet_get_device();
+        if (eth && eth->pci_dev) {
+            char dname[32] = "Unknown";
+            if (eth->pci_dev->vendor_id == 0x10EC) {
+                strcpy(dname, "Realtek RTL8136 (Active)");
+            } else if (eth->pci_dev->vendor_id == 0x8086) {
+                strcpy(dname, "Intel E1000 (Active)");
+            }
+            ksprintf(buf, "- Driver: %s", dname);
+            gfx_puts(win->x + 30, net_status_y + 15, buf, 0x0022AA22); // Green for active
+
+            ksprintf(buf, "- MAC: %02X:%02X:%02X:%02X:%02X:%02X",
+                     eth->mac[0], eth->mac[1], eth->mac[2], eth->mac[3], eth->mac[4], eth->mac[5]);
+            gfx_puts(win->x + 30, net_status_y + 30, buf, 0x00333333);
+        } else {
+            gfx_puts(win->x + 30, net_status_y + 15, "- Driver: Loaded but not bound", 0x00CCCC22);
+        }
+    } else {
+        gfx_puts(win->x + 30, net_status_y + 15, "- Driver: Not active / No card match", 0x00CC2222);
+    }
+    shown += 3; // Make space for the driver status info
 
     // Other PCI Devices
     gfx_puts(win->x + 20, cy + 110 + shown * 15 + 10, "Other Hardware:", 0x00333333);
