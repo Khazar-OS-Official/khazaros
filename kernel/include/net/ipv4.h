@@ -3,14 +3,16 @@
 
 #include <libk/types.h>
 
-// Our static IP configuration - stored in LITTLE-ENDIAN (host byte order).
-// x86 is little-endian: when uint32 is copied into packet bytes it comes out
-// in network (big-endian) order as required by the wire format.
-// Formula: a|(b<<8)|(c<<16)|(d<<24) for IP a.b.c.d
-#define NET_OUR_IP 0x0F02000A     // 10.0.2.15
-#define NET_GATEWAY_IP 0x0202000A // 10.0.2.2
-#define NET_NETMASK 0x00FFFFFF    // 255.255.255.0
-#define NET_BCAST_IP 0xFF02000A   // 10.0.2.255
+// Dynamic network configuration
+extern uint32_t net_our_ip;
+extern uint32_t net_gateway_ip;
+extern uint32_t net_netmask;
+extern uint32_t net_bcast_ip;
+
+#define NET_OUR_IP      net_our_ip
+#define NET_GATEWAY_IP  net_gateway_ip
+#define NET_NETMASK     net_netmask
+#define NET_BCAST_IP    net_bcast_ip
 
 // IP protocol numbers
 #define IP_PROTO_ICMP 1
@@ -24,5 +26,8 @@ bool ipv4_send(uint32_t dst_ip, uint8_t protocol, const void *payload,
 
 // Handle an incoming raw Ethernet payload that has EtherType=0x0800
 void ipv4_handle(const uint8_t *frame, uint16_t frame_len);
+
+// Send an ICMP Echo Request (Ping)
+bool icmp_send_request(uint32_t dst_ip);
 
 #endif // IPV4_H

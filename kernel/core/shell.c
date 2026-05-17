@@ -51,7 +51,7 @@ static const char *history_get(int offset) {
 // ── Tab tamamlama ──────────────────────────────────────────────────────────
 static const char *builtin_commands[] = {
   "help", "ls", "clear", "reboot", "shutdown", "about",
-  "chmod", "pkg", "ping", "cat", "echo",
+  "chmod", "pkg", "ping", "cat", "echo", "ifconfig",
   NULL
 };
 
@@ -174,7 +174,8 @@ static void shell_process_command(char *command) {
     kprintf("  pkg install <ad>  - Lokal paket quraşdır\n");
     kprintf("  pkg update        - Uzaq paket siyahısını yenilə\n");
     kprintf("  pkg fetch <ad>    - Paketi serverdən yüklə\n");
-    kprintf("  ping <ip>         - UDP ping göndər\n");
+    kprintf("  ping <ip>         - Standart ICMP ping göndər\n");
+    kprintf("  ifconfig          - Şəbəkə parametrlərinə bax / dəyiş\n");
     kprintf("  sysinfo           - Sistem məlumatları\n");
     kprintf("  [komanda]         - Userland PE binary icra et\n\n");
     terminal_setcolor(vga_entry_color(VGA_COLOR_DARK_GREY, VGA_COLOR_BLACK));
@@ -322,14 +323,97 @@ static void shell_process_command(char *command) {
     }
 
     if (got_arp) {
-      const char *msg = "PING from Khazar OS!";
-      if (udp_send(dst_ip, 7, (const uint8_t *)msg, 21)) {
-        kprintf("ping: UDP göndərildi %d.%d.%d.%d port 7\n", a, b, c, d);
-      } else {
-        kprintf("ping: UDP göndərmə uğursuz oldu\n");
+      if (!icmp_send_request(dst_ip)) {
+        kprintf("ping: ICMP göndərmə uğursuz oldu\n");
       }
     } else {
       kprintf("ping: %d.%d.%d.%d-dən ARP cavabı gəlmədi\n", a, b, c, d);
+    }
+
+  } else if (strncmp(command, "ifconfig", 8) == 0) {
+    char *args = command + 8;
+    while (*args == ' ') args++;
+
+    if (*args == '\0') {
+      kprintf("\n=== Şəbəkə Konfiqurasiyası ===\n");
+      kprintf("  IP Ünvanı: %d.%d.%d.%d\n",
+              (net_our_ip >> 0) & 0xFF, (net_our_ip >> 8) & 0xFF,
+              (net_our_ip >> 16) & 0xFF, (net_our_ip >> 24) & 0xFF);
+      kprintf("  Şlüz (GW): %d.%d.%d.%d\n",
+              (net_gateway_ip >> 0) & 0xFF, (net_gateway_ip >> 8) & 0xFF,
+              (net_gateway_ip >> 16) & 0xFF, (net_gateway_ip >> 24) & 0xFF);
+      kprintf("  Mask (NM): %d.%d.%d.%d\n",
+              (net_netmask >> 0) & 0xFF, (net_netmask >> 8) & 0xFF,
+              (net_netmask >> 16) & 0xFF, (net_netmask >> 24) & 0xFF);
+      kprintf("  Yayını  (BC): %d.%d.%d.%d\n\n",
+              (net_bcast_ip >> 0) & 0xFF, (net_bcast_ip >> 8) & 0xFF,
+              (net_bcast_ip >> 16) & 0xFF, (net_bcast_ip >> 24) & 0xFF);
+    } else {
+      char ip_str[32] = {0};
+      char gw_str[32] = {0};
+      char nm_str[32] = {0};
+
+      int arg_idx = 0;
+      char *p = args;
+      while (*p != ' ' && *p != '\0' && arg_idx < 31) ip_str[arg_idx++] = *p++;
+      ip_str[arg_idx] = '\0';
+
+      while (*p == ' ') p++;
+      arg_idx = 0;
+      while (*p != ' ' && *p != '\0' && arg_idx < 31) gw_str[arg_idx++] = *p++;
+      gw_str[arg_idx] = '\0';
+
+      while (*p == ' ') p++;
+      arg_idx = 0;
+      while (*p != ' ' && *p != '\0' && arg_idx < 31) nm_str[arg_idx++] = *p++;
+      nm_str[arg_idx] = '\0';
+
+      if (ip_str[0] == '\0') {
+        kprintf("İstifadə: ifconfig [<ip> <gw> <mask>]\n");
+      } else {
+        uint32_t a = 0, b = 0, c = 0, d = 0;
+        char *s = ip_str;
+        while (*s >= '0' && *s <= '9') a = a * 10 + (*s++ - '0');
+        if (*s == '.') s++;
+        while (*s >= '0' && *s <= '9') b = b * 10 + (*s++ - '0');
+        if (*s == '.') s++;
+        while (*s >= '0' && *s <= '9') c = c * 10 + (*s++ - '0');
+        if (*s == '.') s++;
+        while (*s >= '0' && *s <= '9') d = d * 10 + (*s++ - '0');
+        net_our_ip = a | (b << 8) | (c << 16) | (d << 24);
+
+        if (gw_str[0] != '\0') {
+          a = b = c = d = 0;
+          s = gw_str;
+          while (*s >= '0' && *s <= '9') a = a * 10 + (*s++ - '0');
+          if (*s == '.') s++;
+          while (*s >= '0' && *s <= '9') b = b * 10 + (*s++ - '0');
+          if (*s == '.') s++;
+          while (*s >= '0' && *s <= '9') c = c * 10 + (*s++ - '0');
+          if (*s == '.') s++;
+          while (*s >= '0' && *s <= '9') d = d * 10 + (*s++ - '0');
+          net_gateway_ip = a | (b << 8) | (c << 16) | (d << 24);
+        }
+
+        if (nm_str[0] != '\0') {
+          a = b = c = d = 0;
+          s = nm_str;
+          while (*s >= '0' && *s <= '9') a = a * 10 + (*s++ - '0');
+          if (*s == '.') s++;
+          while (*s >= '0' && *s <= '9') b = b * 10 + (*s++ - '0');
+          if (*s == '.') s++;
+          while (*s >= '0' && *s <= '9') c = c * 10 + (*s++ - '0');
+          if (*s == '.') s++;
+          while (*s >= '0' && *s <= '9') d = d * 10 + (*s++ - '0');
+          net_netmask = a | (b << 8) | (c << 16) | (d << 24);
+        }
+
+        net_bcast_ip = (net_our_ip & net_netmask) | (~net_netmask);
+
+        terminal_setcolor(vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
+        kprintf("ifconfig: Şəbəkə konfiqurasiyası uğurla yeniləndi!\n");
+        terminal_setcolor(vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK));
+      }
     }
 
   } else {
