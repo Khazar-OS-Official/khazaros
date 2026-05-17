@@ -11,6 +11,7 @@
 #include <net/ethernet.h>
 #include <net/ipv4.h>
 #include <net/udp.h>
+#include <net/dns.h>
 
 #define SHELL_BUFFER_SIZE 256
 #define SHELL_HISTORY_MAX 16
@@ -51,7 +52,7 @@ static const char *history_get(int offset) {
 // ── Tab tamamlama ──────────────────────────────────────────────────────────
 static const char *builtin_commands[] = {
   "help", "ls", "clear", "reboot", "shutdown", "about",
-  "chmod", "pkg", "ping", "cat", "echo", "ifconfig",
+  "chmod", "pkg", "ping", "cat", "echo", "ifconfig", "nslookup",
   NULL
 };
 
@@ -176,6 +177,7 @@ static void shell_process_command(char *command) {
     kprintf("  pkg fetch <ad>    - Paketi serverdən yüklə\n");
     kprintf("  ping <ip>         - Standart ICMP ping göndər\n");
     kprintf("  ifconfig          - Şəbəkə parametrlərinə bax / dəyiş\n");
+    kprintf("  nslookup <host>   - Domain adını IP-yə həll et (DNS)\n");
     kprintf("  sysinfo           - Sistem məlumatları\n");
     kprintf("  [komanda]         - Userland PE binary icra et\n\n");
     terminal_setcolor(vga_entry_color(VGA_COLOR_DARK_GREY, VGA_COLOR_BLACK));
@@ -416,6 +418,31 @@ static void shell_process_command(char *command) {
 
         terminal_setcolor(vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
         kprintf("ifconfig: Şəbəkə konfiqurasiyası uğurla yeniləndi!\n");
+        terminal_setcolor(vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK));
+      }
+    }
+
+  } else if (strncmp(command, "nslookup ", 9) == 0) {
+    const char *hostname = command + 9;
+    while (*hostname == ' ') hostname++;
+
+    if (*hostname == '\0') {
+      kprintf("İstifadə: nslookup <domain_adı>\n");
+    } else {
+      kprintf("nslookup: '%s' həll edilir (Google DNS 8.8.8.8)... \n", hostname);
+
+      uint32_t resolved_ip = 0;
+      if (dns_resolve(hostname, &resolved_ip)) {
+        terminal_setcolor(vga_entry_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK));
+        kprintf("Uğurla həll edildi:\n");
+        terminal_setcolor(vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK));
+        kprintf("  Ad:     %s\n", hostname);
+        kprintf("  Ünvan:  %d.%d.%d.%d\n\n",
+                (resolved_ip >> 0) & 0xFF, (resolved_ip >> 8) & 0xFF,
+                (resolved_ip >> 16) & 0xFF, (resolved_ip >> 24) & 0xFF);
+      } else {
+        terminal_setcolor(vga_entry_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK));
+        kprintf("nslookup: Domain adı həll edilə bilmədi!\n\n");
         terminal_setcolor(vga_entry_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK));
       }
     }
